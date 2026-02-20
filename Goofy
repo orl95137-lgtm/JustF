@@ -1,1 +1,323 @@
+--------------------------------------------------------------------
+-- CORE SERVICES
+--------------------------------------------------------------------
+local Players = game:GetService("Players")
+local lp = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local VirtualUser = game:GetService("VirtualUser")
 
+--------------------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------------------
+local MAX_CYCLES_BEFORE_REJOIN = 50
+
+--------------------------------------------------------------------
+-- STATE
+--------------------------------------------------------------------
+local FuseDone = false
+local ScreensDone = false
+local ValvesDone = false
+
+local ForceReset = false
+local CycleId = 0
+local CompletedCycles = 0
+
+--------------------------------------------------------------------
+-- UTIL
+--------------------------------------------------------------------
+local function Log(msg)
+    print("[AUTO] " .. msg)
+end
+
+local function getChar()
+    return lp.Character or lp.CharacterAdded:Wait()
+end
+
+local function getRoot()
+    return getChar():WaitForChild("HumanoidRootPart")
+end
+
+local function characterAlive()
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0
+end
+
+local function triggerReset(reason)
+    if ForceReset then return end
+    ForceReset = true
+    Log("WATCHDOG RESET: " .. reason)
+
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.Health = 0 end
+end
+
+--------------------------------------------------------------------
+-- ANTI AFK (SAFE ON ALL EXECUTORS)
+--------------------------------------------------------------------
+lp.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(0.1)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
+
+--------------------------------------------------------------------
+-- AUTO REJOIN
+--------------------------------------------------------------------
+local function autoRejoin()
+    Log("AUTO REJOIN: Max cycles reached")
+    task.wait(2)
+
+    if game.PrivateServerId ~= "" then
+        TeleportService:TeleportToPrivateServer(
+            game.PlaceId,
+            game.PrivateServerId,
+            { lp }
+        )
+    else
+        TeleportService:Teleport(game.PlaceId, lp)
+    end
+end
+
+--------------------------------------------------------------------
+-- FUSE HELPERS
+--------------------------------------------------------------------
+local function findFuseComponents()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj.Name == "Fuse" and obj:FindFirstChild("Sticks") and obj:FindFirstChild("Input") then
+            return obj.Sticks, obj.Input
+        end
+    end
+end
+
+local function fuseExists()
+    local s, i = findFuseComponents()
+    return s ~= nil and i ~= nil
+end
+
+--------------------------------------------------------------------
+-- SCREEN / VALVE EXISTENCE
+--------------------------------------------------------------------
+local function screensExist()
+    return workspace:FindFirstChild("Screens", true) ~= nil
+end
+
+local function valvesExist()
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:FindFirstChild("Puzzles") and obj.Puzzles:FindFirstChild("Valves") then
+            return true
+        end
+    end
+    return false
+end
+
+--------------------------------------------------------------------
+-- GLOBAL WATCHDOG
+--------------------------------------------------------------------
+local function startGlobalWatchdog(myCycle)
+    task.spawn(function()
+        while CycleId == myCycle do
+            if ForceReset then return end
+
+            if not characterAlive() then
+                triggerReset("Character died")
+                return
+            end
+
+            if not FuseDone and not fuseExists() then
+                triggerReset("Fuse missing")
+                return
+            end
+
+            if not ScreensDone and not screensExist() then
+                triggerReset("Screens missing")
+                return
+            end
+
+            if not ValvesDone and not valvesExist() then
+                triggerReset("Valves missing")
+                return
+            end
+
+            task.wait(0.25)
+        end
+    end)
+end
+
+--------------------------------------------------------------------
+-- INTERACTION
+--------------------------------------------------------------------
+local function interactWithTarget(target)
+    if ForceReset or not target then return end
+    local prompt = target:FindFirstChildOfClass("ProximityPrompt")
+    if prompt then
+        fireproximityprompt(prompt)
+    end
+end
+
+--------------------------------------------------------------------
+-- FUSE LOGIC
+--------------------------------------------------------------------
+local function runFuseSequence()
+    FuseDone = false
+
+    while not ForceReset do
+        local s, i = findFuseComponents()
+        if s and i then break end
+        task.wait(0.1)
+    end
+    if ForceReset then return end
+
+    -- TASER LOOP
+    while not ForceReset do
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        local taser = remotes and remotes:FindFirstChild("UseTaser")
+        if taser then taser:FireServer() end
+
+        local sticks = select(1, findFuseComponents())
+        local stick = sticks and sticks:GetChildren()[1]
+        if stick and stick:FindFirstChildOfClass("ProximityPrompt") then
+            break
+        end
+
+        task.wait(0.1)
+    end
+    if ForceReset then return end
+
+    local root = getRoot()
+    for _, slot in ipairs({"One", "Two"}) do
+        if ForceReset then return end
+
+        local sticksFolder, inputFolder = findFuseComponents()
+        local stick = sticksFolder:GetChildren()[1]
+        local input = inputFolder:FindFirstChild(slot)
+
+        root.CFrame = stick.CFrame * CFrame.new(0, 2, 0)
+        task.wait(0.4)
+        interactWithTarget(stick)
+
+        root.CFrame = input.CFrame * CFrame.new(0, 2, 0)
+        task.wait(0.4)
+        interactWithTarget(input)
+    end
+
+    while not ForceReset do
+        local sticksFolder = select(1, findFuseComponents())
+        if sticksFolder and #sticksFolder:GetChildren() == 0 then
+            FuseDone = true
+            return
+        end
+        task.wait(0.1)
+    end
+end
+
+--------------------------------------------------------------------
+-- SCREEN SOLVER
+--------------------------------------------------------------------
+local function startScreenSolver()
+    ScreensDone = false
+    local screens = workspace:FindFirstChild("Screens", true)
+    if not screens then
+        ScreensDone = true
+        return
+    end
+
+    for _, screen in ipairs(screens:GetChildren()) do
+        while not ForceReset do
+            if screen.Color and screen.Color.G == 1 then break end
+            local click = screen:FindFirstChild("PuzzleClickDetector", true)
+            if click then fireclickdetector(click) end
+            task.wait(0.5)
+        end
+    end
+
+    ScreensDone = true
+end
+
+--------------------------------------------------------------------
+-- VALVE HUNTER
+--------------------------------------------------------------------
+local function runValveHunter()
+    ValvesDone = false
+
+    while not ForceReset do
+        local map
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:FindFirstChild("Puzzles") and obj.Puzzles:FindFirstChild("Valves") then
+                map = obj
+                break
+            end
+        end
+
+        if not map then
+            triggerReset("Valve map gone")
+            return
+        end
+
+        local valves = map.Puzzles.Valves:GetChildren()
+        if #valves == 0 then
+            ValvesDone = true
+            return
+        end
+
+        for _, valve in ipairs(valves) do
+            if ForceReset then return end
+            local prompt = valve:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt and prompt.Enabled then
+                local root = getRoot()
+                local pos = valve:GetPivot().Position
+                local start = tick()
+
+                while not ForceReset and prompt.Enabled and tick() - start < 6 do
+                    root.CFrame = CFrame.new(pos + Vector3.new(0, 0, 2))
+                    fireproximityprompt(prompt)
+                    task.wait(0.1)
+                end
+            end
+        end
+
+        ValvesDone = true
+        return
+    end
+end
+
+--------------------------------------------------------------------
+-- MAIN LOOP
+--------------------------------------------------------------------
+task.spawn(function()
+    while true do
+        CycleId += 1
+        ForceReset = false
+
+        local myCycle = CycleId
+        Log("=== NEW CYCLE ===")
+
+        FuseDone = false
+        ScreensDone = false
+        ValvesDone = false
+
+        startGlobalWatchdog(myCycle)
+
+        task.spawn(startScreenSolver)
+        runFuseSequence()
+        runValveHunter()
+
+        while not ForceReset and not (FuseDone and ScreensDone and ValvesDone) do
+            task.wait(0.1)
+        end
+
+        triggerReset("Cycle complete")
+
+        CompletedCycles += 1
+        Log("CYCLES COMPLETED: " .. CompletedCycles)
+
+        if CompletedCycles >= MAX_CYCLES_BEFORE_REJOIN then
+            autoRejoin()
+            return
+        end
+
+        task.wait(1)
+    end
+end)
